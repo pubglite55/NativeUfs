@@ -1308,11 +1308,14 @@ bool NativeUfsBlock::configure (const char *name, uint64_t absoluteOffset, uint6
 
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
 volatile uint64_t native_ufs_verified_blocks = 0;
+volatile uint32_t native_ufs_integrity_failures = 0;
+#endif
 // Time spent hashing/verifying and reading from the UFS transport, in generic-timer ticks (diagnostic only).
+// The read path uses these in every mode, so they live outside the verified block guard.
 volatile uint64_t native_ufs_verify_ticks = 0, native_ufs_read_ticks = 0;
 static inline uint64_t timerTicks (void) {uint64_t v; __asm__ volatile ("isb\n\tmrs %0, cntpct_el0" : "=r" (v)); return v;}
-volatile uint32_t native_ufs_integrity_failures = 0;
 
+#if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
 bool NativeUfsBlock::configureVerification ()
 {
   gRootDiagnostic.stage = "policy selection";
