@@ -4,6 +4,9 @@ struct UfsSmmuPlan {
   unsigned slot = 0xffffffffU, bank = 0, pages = 0;
   uint32_t smr = 0, s2cr = 0;
   bool reuse = false;
+  // The firmware already mapped this stream (SMR matches our SID, S2CR is TYPE=TRANS) to a bank of
+  // its own choosing. We take that bank over and reprogram it, instead of insisting on the top bank.
+  bool adopt = false;
   const char *error = nullptr;
 };
 // ARM IHI 0062D.c sections 1.6 and 3.7: VA64=0 still rejects inputs above
@@ -56,9 +59,20 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
     bool ourBank = ((s2cr >> 16) & 3) == 0 && (s2cr & 255) == p.bank;
     if (match) {
       ++matches;
-      if (matches > 1 || mask || !ourBank) {
+      if (matches > 1 || mask) {
         p.slot = i; p.smr = smr; p.s2cr = s2cr;
         p.error = "conflicting UFS stream mapping"; return p;
+      }
+      if (!ourBank) {
+        // Hardware 2026-10-23: XBL hands the UFS host over already mapped, slot 2 with
+        // SMR=0x80000060 (our SID, mask 0) and S2CR=2 (TYPE=TRANS, CBNDX 2). Demanding the top
+        // context bank made every retry collide with that entry ("conflicting UFS stream mapping
+        // slot=2 smr=80000060 s2cr=2"). Adopt the firmware's bank instead: the SMR already matches
+        // and the caller reprograms SCTLR/CBAR to the same pass-through form a fresh bank gets.
+        p.bank = s2cr & 255;
+        if (p.bank >= banks) { p.error = "firmware stream bank out of range"; return p; }
+        p.adopt = true; p.reuse = true; p.slot = i;
+        continue;
       }
       p.reuse = true; p.slot = i;
     } else if (ourBank) {
@@ -66,8 +80,20 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
       p.error = "reserved context bank already used"; return p;
     }
   }
+  if (p.adopt) {
+    // A bank we take over must belong to this stream alone.
+    for (unsigned i = 0; i < count; ++i) {
+      if (i == p.slot) continue;
+      uint32_t smr = read(0x800 + 4 * i);
+      if (!(smr & 0x80000000U)) continue;
+      uint32_t s2cr = read(0xc00 + 4 * i);
+      if (((s2cr >> 16) & 3) == 0 && (s2cr & 255) == p.bank) {
+        p.error = "adopted context bank shared with another stream"; return p;
+      }
+    }
+  }
   uint32_t sctlr = read((p.pages + p.bank) * 4096);
-  if ((sctlr & 1) || (p.reuse && (sctlr || read(0x1000 + 4 * p.bank) != 0x10000 ||
+  if ((!p.adopt && (sctlr & 1)) || (p.reuse && !p.adopt && (sctlr || read(0x1000 + 4 * p.bank) != 0x10000 ||
                                 (read(0x1800 + 4 * p.bank) & ~1U)))) {
     p.error = "reserved context bank not bypass"; return p;
   }
@@ -107,15 +133,18 @@ static const char *configureUfsSmmu(const UfsSmmuPlan &p, uint16_t stream, Read 
 {
   if (p.error) return p.error;
   unsigned cb = (p.pages + p.bank) * 4096;
-  if (!p.reuse) write(cb, 0);
+  // An adopted bank is reprogrammed exactly like a fresh one: its SMR already names our stream, so
+  // rewriting the S2CR/SMR pair writes back the same values the firmware left there.
+  bool fresh = !p.reuse || p.adopt;
+  if (fresh) write(cb, 0);
   if (read(cb) != 0) return "SMMU bypass disable readback";
   // Set VA64 before exposing a newly allocated stream. Repair an exclusive
   // existing 32-bit bypass too; do not silently reuse the faulty state.
   if (read(0x1800 + 4 * p.bank) != 1) write(0x1800 + 4 * p.bank, 1);
-  if (!p.reuse) write(0x1000 + 4 * p.bank, 0x10000);
+  if (fresh) write(0x1000 + 4 * p.bank, 0x10000);
   if (read(0x1800 + 4 * p.bank) != 1 || read(0x1000 + 4 * p.bank) != 0x10000 || read(cb) != 0)
     return "SMMU VA64 bypass readback";
-  if (!p.reuse) {
+  if (fresh) {
     write(0xc00 + 4 * p.slot, p.bank);
     if (read(0xc00 + 4 * p.slot) != p.bank) return "SMMU stream context readback";
     write(0x800 + 4 * p.slot, 0x80000000U | stream);
