@@ -19,6 +19,7 @@ extern const uint8_t verified_root_key[];
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSIterator.h>
 #include <IOKit/IOBSD.h>
+#include <IOKit/IOMedia.h>
 #include <kern/thread.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -1226,6 +1227,7 @@ public:
   bool signedVolumeUuid (char out[37]) const;
 #endif
   const char *windowLabel () const { return label; }
+  uint64_t windowBytes () const { return bytes; }
   bool configure (const char *name, uint64_t absoluteOffset, uint64_t size);
   bool start (IOService *provider) override;
   void free () override;
@@ -1633,7 +1635,8 @@ static void discardPendingWindow (unsigned index)
   device->release ();
 }
 
-static void nudgeServiceMatching (IOService *parent);
+static const char kRootLeafName[] = "ufsroot0";
+static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name);
 
 static void publishThread (void *, wait_result_t)
 {
@@ -1684,9 +1687,13 @@ static void publishThread (void *, wait_result_t)
              static_cast<unsigned> (result.phase), result.index, result.published, gRootMediaText);
     }
   } else {
-    // Both windows are up. Wake the kernel's root wait so it rescans and sees them.
-    IOSleep (200);
-    nudgeServiceMatching (gPendingProvider);
+    // Both windows are up. Hand the kernel a media that is registered already carrying the name
+    // and content it matches on: IOMediaBSDClient attaches the BSD name only after a media has
+    // registered, and IOFindBSDRoot re-scans the registry exactly once, so a media that shows up
+    // without them is never seen.
+    for (unsigned i = 0; i < gPending; ++i) {
+      publishNamedRootLeaf (gPendingDevice[i], i == gPublicationPlan.order[0] ? kRootLeafName : nullptr);
+    }
   }
   gPendingProvider->release ();  // Balanced with successful thread dispatch.
 }
@@ -1771,20 +1778,63 @@ static void mediaReportThread (void *, wait_result_t)
 // registers before IOMediaBSDClient attaches the BSD name it is matched by, and this boot has
 // almost no further registrations, so without one more publication the wait never re-examines
 // the media and expires. Publishing a trivial nub gives it that wakeup.
-static void nudgeServiceMatching (IOService *parent)
+// The whole-disk media IOStorageFamily created for this window. Reads through it already work,
+// which is what a leaf published on top of it relies on.
+static IOMedia *wholeMediaFor (NativeUfsBlock *window)
 {
-  IOService *nub = OSTypeAlloc (IOService);
-  if (!nub) {
+  IOMedia *found = nullptr;
+  OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+  OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+  for (unsigned n = 0; iterator && n < 64 && !found; ++n) {
+    IOMedia *media = OSDynamicCast (IOMedia, iterator->getNextObject ());
+    if (!media) {
+      break;
+    }
+    OSBoolean *whole = OSDynamicCast (OSBoolean, media->getProperty (kIOMediaWholeKey));
+    if (!whole || !whole->getValue ()) {
+      continue;
+    }
+    IORegistryIterator *parents = IORegistryIterator::iterateOver (
+      media, gIOServicePlane, kIORegistryIterateRecursively | kIORegistryIterateParents);
+    if (parents) {
+      if (ufsMediaHasAncestor (*parents, window)) {
+        found = media;
+        found->retain ();
+      }
+      parents->release ();
+    }
+  }
+  OSSafeReleaseNULL (iterator);
+  OSSafeReleaseNULL (matching);
+  return found;
+}
+
+static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name)
+{
+  IOMedia *whole = wholeMediaFor (window);
+  if (!whole) {
     return;
   }
-  if (!nub->init ()) {
-    nub->release ();
-    return;
+  IOMedia *leaf = OSTypeAlloc (IOMedia);
+  if (leaf && leaf->init (0, window->windowBytes (), 512, false, true, false, nullptr, whole)) {
+    if (name) {
+      OSString *bsd = OSString::withCStringNoCopy (name);
+      if (bsd) {
+        leaf->setProperty (kIOBSDNameKey, bsd);
+        bsd->release ();
+      }
+    }
+    OSString *content = OSString::withCStringNoCopy ("Apple_HFS");
+    if (content) {
+      leaf->setProperty (kIOMediaContentKey, content);
+      content->release ();
+    }
+    if (leaf->attach (whole)) {
+      leaf->registerService ();
+    }
   }
-  if (parent && nub->attach (parent)) {
-    nub->registerService ();
-  }
-  nub->release ();
+  OSSafeReleaseNULL (leaf);
+  whole->release ();
 }
 
 static void matchCheckThread (void *argument, wait_result_t)
