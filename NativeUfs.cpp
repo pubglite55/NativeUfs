@@ -1861,9 +1861,9 @@ static void rootBringUpStop (const char *stage, const char *why, const RootLayou
     return;
   }
   panic ("NATIVE_UFS root stop: %s: %s\n"
-         "mstatus=%u magic=%08x %08x ext4=%04x/%u\n"
+         "part=%s mstatus=%u magic=%08x %08x ext4=%04x/%u\n"
          "windows=%u first=%llx last=%llx",
-         stage, why ? why : "-",
+         stage, why ? why : "-", gRootPartition,
          layout ? layout->manifestStatus : 0xffffffffU,
          layout ? layout->magic0 : 0, layout ? layout->magic1 : 0,
          layout ? layout->ext4Magic : 0, layout ? layout->ext4Blocks : 0,
@@ -1879,6 +1879,11 @@ bool NativeUfs::startRoot (IOService *provider)
   unsigned unverified = 0;
   PE_parse_boot_argn ("native-ufs-root-unverified", &unverified, sizeof (unverified));
   gRootUnverifiedBringUp = unverified == 1;
+  char partition[64] = {};
+  if (PE_parse_boot_argn ("native-ufs-root-partition", partition, static_cast<int> (sizeof (partition))) &&
+      partition[0]) {
+    strlcpy (gRootPartition, partition, sizeof (gRootPartition));
+  }
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);

@@ -23,6 +23,10 @@ struct RootLayout {
 };
 
 static uint8_t gScratch[kDataMax];
+// GPT partition the root manifest is read from. Production uses "userdata"; the driver can
+// point the same read-only path at a spare partition with native-ufs-root-partition so root
+// bring-up does not have to erase Android's userdata.
+static char gRootPartition[64] = "userdata";
 
 static uint32_t le32 (const uint8_t *at)
 {
@@ -103,7 +107,6 @@ static bool findRootLayout (RootLayout *layout, const char **why)
     *why = "GPT entries CRC";
     return false;
   }
-  static const char wanted[] = "userdata";
   bool found = false;
   for (uint32_t index = 0; index < count; index++) {
     const uint8_t *entry = gScratch + index * 128;
@@ -121,15 +124,17 @@ static bool findRootLayout (RootLayout *layout, const char **why)
       }
     }
     bool match = true;
-    for (unsigned c = 0; c < sizeof (wanted); c++) {
-      if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {
+    unsigned wantedLength = 0;
+    while (wantedLength < sizeof (gRootPartition) && gRootPartition[wantedLength]) ++wantedLength;
+    for (unsigned c = 0; c <= wantedLength; c++) {
+      if (entry[56 + 2 * c] != static_cast<uint8_t> (gRootPartition[c]) || entry[57 + 2 * c] != 0) {
         match = false;
         break;
       }
     }
     if (match) {
       if (found) {
-        *why = "duplicate userdata partition";
+        *why = "duplicate root partition";
         return false;
       }
       layout->userdataFirst = le64 (entry + 32);
@@ -138,7 +143,7 @@ static bool findRootLayout (RootLayout *layout, const char **why)
     }
   }
   if (!found || layout->userdataLast < layout->userdataFirst) {
-    *why = "no userdata partition";
+    *why = "no root partition with that name";
     return false;
   }
   gRootDiagnostic.first = layout->userdataFirst;
