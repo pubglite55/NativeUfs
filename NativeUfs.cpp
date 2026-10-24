@@ -1815,7 +1815,11 @@ static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name)
   if (!whole) {
     return;
   }
-  IOMedia *leaf = OSTypeAlloc (IOMedia);
+  // IOMedia lives in IOStorageFamily, which loads after this driver is linked into the kernel,
+  // so its metaClass is not a link-time symbol here. Resolve the class by name at run time and
+  // reach it through the virtual interface instead.
+  OSObject *object = OSMetaClass::allocClassWithName ("IOMedia");
+  IOMedia *leaf = reinterpret_cast<IOMedia *> (object);
   if (leaf && leaf->init (0, window->windowBytes (), 512, false, true, false, nullptr)) {
     if (name) {
       OSString *bsd = OSString::withCStringNoCopy (name);
