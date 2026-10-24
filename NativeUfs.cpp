@@ -1780,13 +1780,13 @@ static void mediaReportThread (void *, wait_result_t)
 // the media and expires. Publishing a trivial nub gives it that wakeup.
 // The whole-disk media IOStorageFamily created for this window. Reads through it already work,
 // which is what a leaf published on top of it relies on.
-static IOMedia *wholeMediaFor (NativeUfsBlock *window)
+static IOService *wholeMediaFor (NativeUfsBlock *window)
 {
-  IOMedia *found = nullptr;
+  IOService *found = nullptr;
   OSDictionary *matching = IOService::serviceMatching ("IOMedia");
   OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
   for (unsigned n = 0; iterator && n < 64 && !found; ++n) {
-    IOMedia *media = OSDynamicCast (IOMedia, iterator->getNextObject ());
+    IOService *media = OSDynamicCast (IOService, iterator->getNextObject ());
     if (!media) {
       break;
     }
@@ -1811,7 +1811,7 @@ static IOMedia *wholeMediaFor (NativeUfsBlock *window)
 
 static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name)
 {
-  IOMedia *whole = wholeMediaFor (window);
+  IOService *whole = wholeMediaFor (window);
   if (!whole) {
     return;
   }
