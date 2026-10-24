@@ -1681,6 +1681,10 @@ static void publishThread (void *, wait_result_t)
       panic ("NATIVE_UFS root publish stop: phase=%u window=%u published=%u\n%s",
              static_cast<unsigned> (result.phase), result.index, result.published, gRootMediaText);
     }
+  } else {
+    // Both windows are up. Wake the kernel's root wait so it rescans and sees them.
+    IOSleep (200);
+    nudgeServiceMatching (gPendingProvider);
   }
   gPendingProvider->release ();  // Balanced with successful thread dispatch.
 }
@@ -1759,6 +1763,26 @@ static void mediaReportThread (void *, wait_result_t)
     matching->release ();
   }
   panic ("%s", gMediaReport);
+}
+
+// The kernel's root wait rescans the registry only when a service is published. Our media
+// registers before IOMediaBSDClient attaches the BSD name it is matched by, and this boot has
+// almost no further registrations, so without one more publication the wait never re-examines
+// the media and expires. Publishing a trivial nub gives it that wakeup.
+static void nudgeServiceMatching (IOService *parent)
+{
+  IOService *nub = OSTypeAlloc (IOService);
+  if (!nub) {
+    return;
+  }
+  if (!nub->init ()) {
+    nub->release ();
+    return;
+  }
+  if (parent && nub->attach (parent)) {
+    nub->registerService ();
+  }
+  nub->release ();
 }
 
 static void matchCheckThread (void *argument, wait_result_t)
