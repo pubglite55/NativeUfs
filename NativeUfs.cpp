@@ -1578,9 +1578,31 @@ static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
   return found;
 }
 
-static void captureMissingMedia (const char *uuid)
+// Unverified bring-up has no signed volume identity to match on, so readiness is "an IOMedia
+// did appear under this window". IOStorageFamily publishes the whole-disk media for the block
+// device asynchronously, and IOGUIDPartitionScheme then derives the Apple_HFS leaf from it.
+static bool mediaExistsFor (NativeUfsBlock *window)
 {
-  int used = snprintf (gRootMediaText, sizeof (gRootMediaText), "Waiting for signed UUID %s\n", uuid);
+  OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+  bool found = false;
+  OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+  for (unsigned matches = 0; iterator && matches < 64 && !found; ++matches) {
+    IORegistryEntry *media = OSDynamicCast (IORegistryEntry, iterator->getNextObject ());
+    if (!media) break;
+    IORegistryIterator *parents = IORegistryIterator::iterateOver (
+      media, gIOServicePlane, kIORegistryIterateRecursively | kIORegistryIterateParents);
+    if (parents) {
+      found = ufsMediaHasAncestor (*parents, window);
+      parents->release ();
+    }
+  }
+  OSSafeReleaseNULL (iterator);
+  OSSafeReleaseNULL (matching);
+  return found;
+}
+
+static void captureMissingMedia (const char *uuid)
+{  int used = snprintf (gRootMediaText, sizeof (gRootMediaText), "Waiting for signed UUID %s\n", uuid);
   OSDictionary *matching = IOService::serviceMatching ("IOMedia");
   OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
   unsigned count = 0;
@@ -1632,12 +1654,14 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.publicationWindow = index;
       bool ready = false;
       // Diagnostic mode affects reporting only, never the dependency gate.
+      bool requireUuid = uuid && uuid[0];
       for (unsigned tick = 0; tick <= 300; ++tick) {
-        ready = mediaWithUuidExists (uuid, device);
+        ready = requireUuid ? mediaWithUuidExists (uuid, device) : mediaExistsFor (device);
         if (ready || tick == 300) break;
         IOSleep (100);
       }
-      IOLog ("NativeUfs: %s volume %s %s\n", device->windowLabel (), uuid, ready ? "ready" : "not ready");
+      IOLog ("NativeUfs: %s volume %s %s\n", device->windowLabel (),
+             requireUuid ? uuid : "(unverified)", ready ? "ready" : "not ready");
       if (!ready) captureMissingMedia (uuid);
       return ready;
     }
@@ -1653,6 +1677,10 @@ static void publishThread (void *, wait_result_t)
     // Start failures have already released their unpublished object; do not
     // dereference it here. The media-failure object is deliberately retained.
     rootDiagnosticFailure (reason);
+    if (gRootUnverifiedBringUp) {
+      panic ("NATIVE_UFS root publish stop: phase=%u window=%u published=%u\n%s",
+             static_cast<unsigned> (result.phase), result.index, result.published, gRootMediaText);
+    }
   }
   gPendingProvider->release ();  // Balanced with successful thread dispatch.
 }
