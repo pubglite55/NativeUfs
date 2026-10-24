@@ -36,6 +36,9 @@ extern const uint8_t verified_root_key[];
 
 static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
+// Set from native-ufs-root-unverified=1. Only consulted by builds compiled without
+// NATIVE_VERIFIED_BLOCK, where no signed policy exists to authenticate the windows.
+static bool gRootUnverifiedBringUp;
 static void rootDiagnosticFailure (const char *reason);
 
 extern "C" {
@@ -1849,14 +1852,37 @@ bool NativeUfs::start (IOService *provider)
   return false;
 }
 
+// A soft failure normally only reaches IOLog, and this board has no console: the kernel
+// would look like it stalled. While native-ufs-root-unverified=1 is in force, stop at the
+// failing stage instead so the panic screen prints the decision inputs. Inert otherwise.
+static void rootBringUpStop (const char *stage, const char *why, const RootLayout *layout)
+{
+  if (!gRootUnverifiedBringUp) {
+    return;
+  }
+  panic ("NATIVE_UFS root stop: %s: %s\n"
+         "mstatus=%u magic=%08x %08x ext4=%04x/%u\n"
+         "windows=%u first=%llx last=%llx",
+         stage, why ? why : "-",
+         layout ? layout->manifestStatus : 0xffffffffU,
+         layout ? layout->magic0 : 0, layout ? layout->magic1 : 0,
+         layout ? layout->ext4Magic : 0, layout ? layout->ext4Blocks : 0,
+         layout ? layout->windows : 0,
+         layout ? layout->userdataFirst : 0ULL, layout ? layout->userdataLast : 0ULL);
+}
+
 // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
 bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
   native_ufs_root_step = 1;
+  unsigned unverified = 0;
+  PE_parse_boot_argn ("native-ufs-root-unverified", &unverified, sizeof (unverified));
+  gRootUnverifiedBringUp = unverified == 1;
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);
+    rootBringUpStop ("host bring-up", why, nullptr);
     return false;
   }
   native_ufs_root_step = 2;
@@ -1864,6 +1890,7 @@ bool NativeUfs::startRoot (IOService *provider)
   if (!layout || !findRootLayout (layout, &why)) {
     rootDiagnosticFailure (layout ? why : "root layout allocation failed");
     IOLog ("NativeUfs: root layout failed: %s\n", why);
+    rootBringUpStop ("root layout", layout ? why : "allocation", layout);
     if (layout) IOFree (layout, sizeof (RootLayout));
     return false;
   }
@@ -1872,6 +1899,7 @@ bool NativeUfs::startRoot (IOService *provider)
     rootDiagnosticFailure ("root manifest rejected");
     IOLog ("NativeUfs: no valid root manifest in userdata (status %u, magic %08x %08x)\n",
            layout->manifestStatus, layout->magic0, layout->magic1);
+    rootBringUpStop ("root manifest", "rejected", layout);
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
@@ -1881,11 +1909,13 @@ bool NativeUfs::startRoot (IOService *provider)
   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
   if (!ufsBuildRootPlan (names, layout->windows, gPublicationPlan)) {
     rootDiagnosticFailure ("root windows require distinct OS and SystemOS");
+    rootBringUpStop ("root plan", "need distinct OS and SystemOS", layout);
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
   if (!IOService::start (provider)) {
     rootDiagnosticFailure ("root IOService start failed");
+    rootBringUpStop ("root service start", "IOService::start", layout);
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
@@ -1925,7 +1955,16 @@ bool NativeUfs::startRoot (IOService *provider)
       }
       return true;
 #else
-      return false; // Root publication requires owner verification in every build.
+      // This build carries no signed policy, so there is no owner identity to compare: the
+      // windows are exactly the ones the manifest described. Publishing them is a deliberate
+      // bring-up concession, so it stays off unless the operator asks for it with
+      // native-ufs-root-unverified=1. A production build is compiled with
+      // NATIVE_VERIFIED_BLOCK, never reaches this branch, and keeps the hard refusal.
+      if (!gRootUnverifiedBringUp) {
+        gRootDiagnostic.stage = "unverified root publication not requested";
+        return false;
+      }
+      return true;
 #endif
     }
     bool schedule () {
@@ -1951,6 +1990,10 @@ bool NativeUfs::startRoot (IOService *provider)
       result.phase == UfsRootPhase::Schedule ? kIOReturnNoResources : kIOReturnError;
     IOLog ("NativeUfs: root preparation failed phase=%u window=%u; nothing published\n",
            static_cast<unsigned> (result.phase), result.index);
+    if (gRootUnverifiedBringUp) {
+      panic ("NATIVE_UFS root publish stop: phase=%u window=%u\n",
+             static_cast<unsigned> (result.phase), result.index);
+    }
     IOService::stop (provider);
     rootDiagnosticFailure (result.phase == UfsRootPhase::Schedule ? "root publisher thread creation failed" :
                           result.phase == UfsRootPhase::Identity ? "signed window identities rejected" :
