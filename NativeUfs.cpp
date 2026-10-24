@@ -1636,6 +1636,8 @@ static void discardPendingWindow (unsigned index)
 }
 
 static const char kRootLeafName[] = "ufsroot0";
+// Outcome of the named-leaf publication, reported by native-ufs-probe=15.
+static volatile uint32_t gLeafObject, gLeafInit, gLeafAttach, gLeafRegistered;
 static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name);
 
 static void publishThread (void *, wait_result_t)
@@ -1820,7 +1822,9 @@ static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name)
   // reach it through the virtual interface instead.
   OSObject *object = OSMetaClass::allocClassWithName ("IOMedia");
   IOMedia *leaf = reinterpret_cast<IOMedia *> (object);
+  gLeafObject = leaf ? 1 : 0;
   if (leaf && leaf->init (0, window->windowBytes (), 512, false, true, false, nullptr)) {
+    gLeafInit = 1;
     if (name) {
       OSString *bsd = OSString::withCStringNoCopy (name);
       if (bsd) {
@@ -1834,7 +1838,9 @@ static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name)
       content->release ();
     }
     if (leaf->attach (whole)) {
+      gLeafAttach = 1;
       leaf->registerService ();
+      gLeafRegistered = 1;
     }
   }
   OSSafeReleaseNULL (leaf);
@@ -1849,7 +1855,7 @@ static void matchCheckThread (void *argument, wait_result_t)
   // branch (IOBSDNameMatching), then the fallback branch (Content == "Apple_HFS").
   bool byName = false, byContent = false;
   char detail[96] = "-";
-  OSDictionary *named = IOBSDNameMatching ("disk0s1");
+  OSDictionary *named = IOBSDNameMatching (kRootLeafName);
   if (named) {
     IOService *service = IOService::waitForMatchingService (named, 3ULL * 1000000000ULL);
     byName = service != nullptr;
