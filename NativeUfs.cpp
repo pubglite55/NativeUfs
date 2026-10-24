@@ -1816,7 +1816,7 @@ static void publishNamedRootLeaf (NativeUfsBlock *window, const char *name)
     return;
   }
   IOMedia *leaf = OSTypeAlloc (IOMedia);
-  if (leaf && leaf->init (0, window->windowBytes (), 512, false, true, false, nullptr, whole)) {
+  if (leaf && leaf->init (0, window->windowBytes (), 512, false, true, false, nullptr)) {
     if (name) {
       OSString *bsd = OSString::withCStringNoCopy (name);
       if (bsd) {
