@@ -1761,6 +1761,43 @@ static void mediaReportThread (void *, wait_result_t)
   panic ("%s", gMediaReport);
 }
 
+static void matchCheckThread (void *argument, wait_result_t)
+{
+  unsigned delay = static_cast<unsigned> (reinterpret_cast<uintptr_t> (argument));
+  IOSleep (delay * 1000);
+  // Reproduce exactly what IOFindBSDRoot does, while it is still waiting: first the named-root
+  // branch (IOBSDNameMatching), then the fallback branch (Content == "Apple_HFS").
+  bool byName = false, byContent = false;
+  char detail[96] = "-";
+  OSDictionary *named = IOBSDNameMatching ("disk0s1");
+  if (named) {
+    IOService *service = IOService::waitForMatchingService (named, 3ULL * 1000000000ULL);
+    byName = service != nullptr;
+    if (service) {
+      OSString *bsd = OSDynamicCast (OSString, service->getProperty (kIOBSDNameKey));
+      OSNumber *maj = OSDynamicCast (OSNumber, service->getProperty (kIOBSDMajorKey));
+      OSNumber *min = OSDynamicCast (OSNumber, service->getProperty (kIOBSDMinorKey));
+      snprintf (detail, sizeof (detail), "%s %u:%u", bsd ? bsd->getCStringNoCopy () : "-",
+                maj ? maj->unsigned32BitValue () : 0, min ? min->unsigned32BitValue () : 0);
+    }
+    named->release ();
+  }
+  OSDictionary *byContentMatch = IOService::serviceMatching ("IOMedia");
+  if (byContentMatch) {
+    OSString *hfs = OSString::withCStringNoCopy ("Apple_HFS");
+    if (hfs) {
+      byContentMatch->setObject ("Content", hfs);
+      hfs->release ();
+    }
+    byContent = IOService::waitForMatchingService (byContentMatch, 3ULL * 1000000000ULL) != nullptr;
+    byContentMatch->release ();
+  }
+  captureMissingMedia ("");
+  panic ("NATIVE_UFS match check after %u s\n"
+         "byName(disk0s1)=%u [%s] byContent(Apple_HFS)=%u\n%s",
+         delay, byName, detail, byContent, gRootMediaText);
+}
+
 bool NativeUfs::start (IOService *provider)
 {
   unsigned probe = 0, rootMode = 0;
@@ -1870,6 +1907,23 @@ bool NativeUfs::start (IOService *provider)
     thread_t thread = nullptr;
     if (kernel_thread_start (mediaReportThread, nullptr, &thread) != KERN_SUCCESS) {
       panic ("NATIVE_UFS media report: cannot start the report thread");
+    }
+    thread_deallocate (thread);
+    return true;
+  }
+  if (probe == 15) {
+    // Publish as usual, then report whether the kernel's two root-matching strategies find the
+    // window, while IOFindBSDRoot is still inside its wait. Distinguishes "never matched" from
+    // "matched but never mounted", which otherwise produce an identical panic line.
+    if (!startRoot (provider)) {
+      panic ("NATIVE_UFS match check: root start failed (blocks=%u)", native_ufs_blocks_published);
+    }
+    unsigned delay = 25;
+    PE_parse_boot_argn ("native-ufs-stats-delay", &delay, sizeof (delay));
+    thread_t thread = nullptr;
+    if (kernel_thread_start (matchCheckThread, reinterpret_cast<void *> (static_cast<uintptr_t> (delay)),
+                             &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS match check: cannot start the thread");
     }
     thread_deallocate (thread);
     return true;
