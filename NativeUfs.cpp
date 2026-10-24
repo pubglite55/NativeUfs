@@ -19,7 +19,7 @@ extern const uint8_t verified_root_key[];
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSIterator.h>
 #include <IOKit/IOBSD.h>
-#include <IOKit/IOMedia.h>
+#include <IOKit/storage/IOMedia.h>
 #include <kern/thread.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
