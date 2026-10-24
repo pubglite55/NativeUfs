@@ -1633,6 +1633,8 @@ static void discardPendingWindow (unsigned index)
   device->release ();
 }
 
+static void nudgeServiceMatching (IOService *parent);
+
 static void publishThread (void *, wait_result_t)
 {
   struct Operations {
